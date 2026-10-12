@@ -1,0 +1,14 @@
+[project]
+name = "opspilot"
+version = "1.0.0"
+description = "Incident triage copilot for AWS workloads, built with LangGraph"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]

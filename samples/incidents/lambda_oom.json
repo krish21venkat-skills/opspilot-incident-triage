@@ -1,0 +1,10 @@
+{
+  "title": "Errors alarm on opspilot-demo-checkout-dev",
+  "description": "Threshold Crossed: 1 datapoint [4.0] was greater than or equal to the threshold (1.0).",
+  "service": "checkout",
+  "severity": "P2",
+  "resource": {
+    "function_name": "opspilot-demo-checkout-dev",
+    "log_group": "/aws/lambda/opspilot-demo-checkout-dev"
+  }
+}

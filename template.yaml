@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  OpsPilot - an incident triage copilot. CloudWatch alarms become incidents, a LangGraph
+  workflow diagnoses them, and a human approves any change to infrastructure.
+  Designed to stay inside the AWS free tier; Bedrock is the only metered service and is off by default.
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    AllowedPattern: "^[a-z][a-z0-9]{1,9}$"
+    Description: Short environment name used in resource names.
+  NotifyEmail:
+    Type: String
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    Description: Address that receives triage and approval emails (you must confirm the SNS subscription).
+  LlmProvider:
+    Type: String
+    Default: mock
+    AllowedValues: [mock, bedrock]
+    Description: mock is free and offline. bedrock calls Amazon Bedrock and is billed per token.
+  BedrockModelId:
+    Type: String
+    Default: apac.amazon.nova-lite-v1:0
+    Description: Bedrock model or inference profile ID, used only when LlmProvider is bedrock.
+  AllowMutatingActions:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: When false, infrastructure changes are reported as DRY-RUN and not applied.
+  TokenParameterName:
+    Type: String
+    Default: /opspilot/dev/api-token
+    Description: SSM SecureString that holds the API bearer token. Create it before calling the API.
+  ManagedPrefix:
+    Type: String
+    Default: opspilot-demo-
+    AllowedPattern: "^[a-z][a-z0-9-]{3,30}-$"
+    Description: Only functions, log groups and alarms with this prefix can be read or changed.
+
+Conditions:
+  UseBedrock: !Equals [!Ref LlmProvider, bedrock]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    MemorySize: 256
+    Timeout: 15
+    Tags:
+      Project: opspilot
+      Environment: !Ref Env
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Env
+        TABLE_NAME: !Ref IncidentsTable
+        QUEUE_URL: !Ref TriageQueue
+        TOPIC_ARN: !Ref NotifyTopic
+        TICKET_BUCKET: !Ref TicketBucket
+        LLM_PROVIDER: !Ref LlmProvider
+        MODEL_ID: !Ref BedrockModelId
+        ALLOW_MUTATING_ACTIONS: !Ref AllowMutatingActions
+        TOKEN_PARAM: !Ref TokenParameterName
+        MANAGED_PREFIX: !Ref ManagedPrefix
+        LOG_LEVEL: INFO
+
+Resources:
+  # ---------------------------------------------------------------- data
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub opspilot-${Env}-incidents
+      # Provisioned capacity stays inside the always-free allowance (25 units). On-demand does not.
+      BillingMode: PROVISIONED
+      ProvisionedThroughput: { ReadCapacityUnits: 5, WriteCapacityUnits: 5 }
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: entity, AttributeType: S }
+        - { AttributeName: created_at, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: recent-index
+          KeySchema:
+            - { AttributeName: entity, KeyType: HASH }
+            - { AttributeName: created_at, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+          ProvisionedThroughput: { ReadCapacityUnits: 2, WriteCapacityUnits: 2 }
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+      Tags:
+        - { Key: Project, Value: opspilot }
+
+  TicketBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-tickets
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - { Key: Project, Value: opspilot }
+
+  # ---------------------------------------------------------------- messaging
+  TriageDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub opspilot-${Env}-triage-dlq
+      MessageRetentionPeriod: 1209600
+
+  TriageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub opspilot-${Env}-triage
+      # Must exceed the worker timeout; AWS advises at least six times for Lambda consumers.
+      VisibilityTimeout: 540
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TriageDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  NotifyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub opspilot-${Env}-notify
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref NotifyEmail }
+
+  # ---------------------------------------------------------------- API
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      Auth:
+        DefaultAuthorizer: BearerAuth
+        Authorizers:
+          BearerAuth:
+            AuthorizerPayloadFormatVersion: "2.0"
+            EnableSimpleResponses: true
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Headers: [Authorization]
+              ReauthorizeEvery: 300
+
+  AuthorizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/opspilot-${Env}-authorizer
+      RetentionInDays: 14
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub opspilot-${Env}-authorizer
+      CodeUri: src/
+      Handler: opspilot.handlers.authorizer.handler
+      Timeout: 10
+      MemorySize: 512
+      LoggingConfig: { LogGroup: !Ref AuthorizerLogGroup }
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParameterName}
+
+  AuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AuthorizerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/authorizers/*
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/opspilot-${Env}-api
+      RetentionInDays: 14
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub opspilot-${Env}-api
+      CodeUri: src/
+      Handler: opspilot.handlers.api.handler
+      LoggingConfig: { LogGroup: !Ref ApiLogGroup }
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+              Resource: !GetAtt IncidentsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub ${IncidentsTable.Arn}/index/recent-index
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt TriageQueue.Arn
+      Events:
+        CreateIncident:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /incidents, Method: POST }
+        ListIncidents:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /incidents, Method: GET }
+        GetIncident:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/incidents/{id}", Method: GET }
+        Approve:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/incidents/{id}/approve", Method: POST }
+        Reject:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/incidents/{id}/reject", Method: POST }
+
+  # ---------------------------------------------------------------- ingestion from CloudWatch
+  AlarmIngestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/opspilot-${Env}-alarm-ingest
+      RetentionInDays: 14
+
+  AlarmIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub opspilot-${Env}-alarm-ingest
+      CodeUri: src/
+      Handler: opspilot.handlers.alarm_ingest.handler
+      LoggingConfig: { LogGroup: !Ref AlarmIngestLogGroup }
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+              Resource: !GetAtt IncidentsTable.Arn
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt TriageQueue.Arn
+      Events:
+        AlarmFired:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.cloudwatch]
+              detail-type: [CloudWatch Alarm State Change]
+              detail:
+                state:
+                  value: [ALARM]
+                alarmName:
+                  - prefix: !Ref ManagedPrefix
+
+  # ---------------------------------------------------------------- the AI worker
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/opspilot-${Env}-worker
+      RetentionInDays: 14
+
+  TriageWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub opspilot-${Env}-worker
+      CodeUri: src/
+      Handler: opspilot.handlers.triage_worker.handler
+      Timeout: 90
+      MemorySize: 512
+      LoggingConfig: { LogGroup: !Ref WorkerLogGroup }
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt IncidentsTable.Arn
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${TicketBucket.Arn}/tickets/*
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref NotifyTopic
+            - Effect: Allow
+              Action: logs:FilterLogEvents
+              Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ManagedPrefix}*:*
+            - Effect: Allow
+              Action: [lambda:GetFunctionConfiguration, lambda:UpdateFunctionConfiguration]
+              Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ManagedPrefix}*
+        - !If
+          - UseBedrock
+          - Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/amazon.nova-*
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}
+          - !Ref AWS::NoValue
+      Events:
+        TriageJobs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TriageQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  # ---------------------------------------------------------------- demo workload that fails on purpose
+  DemoWorkloadLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ManagedPrefix}workload-${Env}
+      RetentionInDays: 14
+
+  DemoWorkloadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ManagedPrefix}workload-${Env}
+      CodeUri: src/
+      Handler: opspilot.demo.workload.handler
+      MemorySize: 128
+      Timeout: 3
+      LoggingConfig: { LogGroup: !Ref DemoWorkloadLogGroup }
+
+  DemoWorkloadErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ManagedPrefix}workload-errors-${Env}
+      AlarmDescription: The demo workload reported at least one error in a minute.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref DemoWorkloadFunction }
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # ---------------------------------------------------------------- watching the watcher
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub opspilot-${Env}-dead-letter-queue-not-empty
+      AlarmDescription: A triage job failed three times. Inspect the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !GetAtt TriageDeadLetterQueue.QueueName }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref NotifyTopic]
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the incident API
+    Value: !GetAtt HttpApi.ApiEndpoint
+  DemoFunctionName:
+    Description: Invoke this function to create real failures
+    Value: !Ref DemoWorkloadFunction
+  DemoAlarmName:
+    Value: !Ref DemoWorkloadErrorsAlarm
+  TableName:
+    Value: !Ref IncidentsTable
+  TicketBucketName:
+    Value: !Ref TicketBucket
+  TriageQueueUrl:
+    Value: !Ref TriageQueue
+  DeadLetterQueueUrl:
+    Value: !Ref TriageDeadLetterQueue

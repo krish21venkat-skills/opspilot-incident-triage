@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check src tests
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v
+      - name: Validate the CloudFormation template
+        run: cfn-lint template.yaml
+      - name: Offline smoke test of the whole workflow
+        run: PYTHONPATH=src python -m opspilot.cli triage samples/incidents/lambda_oom.json --approve

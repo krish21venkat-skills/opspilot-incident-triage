@@ -1,0 +1,10 @@
+{
+  "title": "Errors alarm on opspilot-demo-notifier-dev",
+  "description": "Threshold Crossed: 3 datapoints were greater than or equal to the threshold (1.0).",
+  "service": "notifier",
+  "severity": "P3",
+  "resource": {
+    "function_name": "opspilot-demo-notifier-dev",
+    "log_group": "/aws/lambda/opspilot-demo-notifier-dev"
+  }
+}

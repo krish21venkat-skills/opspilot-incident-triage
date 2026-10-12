@@ -1,0 +1,21 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "opspilot-dev"
+region = "ap-southeast-2"
+
+[default.build.parameters]
+# A container build downloads Linux wheels, so compiled packages such as pydantic-core
+# work on Lambda even when you build on Windows or macOS. Requires Docker Desktop.
+use_container = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+tags = "Project=opspilot"
+# Pass the email on the command line so it never lands in git:
+#   sam deploy --parameter-overrides NotifyEmail=you@example.com
+
+[default.delete.parameters]
+no_prompts = false

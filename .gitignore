@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.env
+.aws-sam/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+# Never commit real credentials, tokens or deployed endpoint details.
+samconfig.local.toml

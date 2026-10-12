@@ -1,0 +1,6 @@
+-r src/requirements.txt
+boto3>=1.35
+ruff>=0.6
+cfn-lint>=1.12
+# Optional: only for the local Ollama provider (free, runs on your machine).
+# langchain-ollama>=0.2

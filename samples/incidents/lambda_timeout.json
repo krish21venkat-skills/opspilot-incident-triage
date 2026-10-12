@@ -1,0 +1,10 @@
+{
+  "title": "Errors alarm on opspilot-demo-reports-dev",
+  "description": "Threshold Crossed: 2 datapoints were greater than or equal to the threshold (1.0).",
+  "service": "reports",
+  "severity": "P2",
+  "resource": {
+    "function_name": "opspilot-demo-reports-dev",
+    "log_group": "/aws/lambda/opspilot-demo-reports-dev"
+  }
+}

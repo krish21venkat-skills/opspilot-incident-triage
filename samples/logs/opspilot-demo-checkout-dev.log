@@ -1,0 +1,6 @@
+START RequestId: 6f1c2a90-1b7e-4c55-9d3a-5a0e2b8f1c11 Version: $LATEST
+Runtime exited with error: signal: killed Runtime.OutOfMemory
+REPORT RequestId: 6f1c2a90-1b7e-4c55-9d3a-5a0e2b8f1c11 Duration: 1873.44 ms Billed Duration: 1874 ms Memory Size: 128 MB Max Memory Used: 128 MB Status: error Error Type: Runtime.OutOfMemory
+START RequestId: 0b3d7e12-8c44-4a6f-b1f2-77d0a9c3e5a2 Version: $LATEST
+Runtime exited with error: signal: killed Runtime.OutOfMemory
+REPORT RequestId: 0b3d7e12-8c44-4a6f-b1f2-77d0a9c3e5a2 Duration: 1902.10 ms Billed Duration: 1903 ms Memory Size: 128 MB Max Memory Used: 128 MB Status: error Error Type: Runtime.OutOfMemory

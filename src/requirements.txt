@@ -1,0 +1,7 @@
+# Runtime dependencies packaged into every Lambda by `sam build`.
+# Lower bounds only; after your first successful build run `pip freeze` in a clean
+# virtualenv and commit the result as a lock file (see the handbook).
+langgraph>=0.2.60
+langchain-core>=0.3.30
+langchain-aws>=0.2.10
+pydantic>=2.7
