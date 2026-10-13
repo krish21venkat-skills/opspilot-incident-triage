@@ -1,8 +1,7 @@
 # OpsPilot — AI-assisted cloud incident triage on AWS
 
 OpsPilot receives CloudWatch alarms, gathers evidence, asks an LLM for a diagnosis, and proposes a fix.
-A human approves anything that changes infrastructure. It is built on AWS serverless services and fits in the AWS free tier
-(the optional Bedrock provider is billed per token and is off by default).
+A human approves anything that changes infrastructure. It is built on AWS serverless services and fits in the AWS free tier.
 
 > **Design stance:** rules decide, the model advises, a human approves. The LLM never picks the target
 > of an action and never executes anything. If the model is down or returns junk, triage still completes.
